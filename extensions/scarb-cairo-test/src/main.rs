@@ -8,13 +8,14 @@ use cairo_lang_compiler::project::{ProjectConfig, ProjectConfigContent};
 use cairo_lang_filesystem::cfg::{Cfg, CfgSet};
 use cairo_lang_filesystem::db::FilesGroup;
 use cairo_lang_filesystem::ids::{CrateLongId, Directory};
+use cairo_lang_starknet::inline_macros::selector::SelectorMacro;
 use cairo_lang_starknet::plugin::StarkNetPlugin;
 use cairo_lang_test_runner::plugin::TestPlugin;
 use cairo_lang_test_runner::TestRunner;
 use clap::Parser;
 
-use scarb_metadata::packages_filter::PackagesFilter;
 use scarb_metadata::{CompilationUnitMetadata, Metadata, MetadataCommand, PackageId};
+use scarb_ui::args::PackagesFilter;
 
 /// Execute all unit tests of a local package.
 #[derive(Parser, Clone, Debug)]
@@ -68,7 +69,13 @@ fn main() -> Result<()> {
 
         let db = build_root_database(unit, starknet)?;
 
-        let main_crate_ids = vec![db.intern_crate(CrateLongId::Real(package.name.clone().into()))];
+        let main_crate_ids = unit
+            .components
+            .iter()
+            .map(|component| db.intern_crate(CrateLongId::Real(component.name.clone().into())))
+            .collect();
+
+        let test_crate_ids = vec![db.intern_crate(CrateLongId::Real(package.name.clone().into()))];
 
         if DiagnosticsReporter::stderr().check(&db) {
             bail!("could not compile `{}` due to previous error", package.name);
@@ -77,6 +84,7 @@ fn main() -> Result<()> {
         let runner = TestRunner {
             db,
             main_crate_ids,
+            test_crate_ids,
             filter: args.filter.clone(),
             include_ignored: args.include_ignored,
             ignored: args.ignored,
@@ -140,6 +148,7 @@ fn build_root_database(unit: &CompilationUnitMetadata, starknet: bool) -> Result
 
     if starknet {
         b.with_macro_plugin(Arc::new(StarkNetPlugin::default()));
+        b.with_inline_macro_plugin(SelectorMacro::NAME, Arc::new(SelectorMacro));
     }
 
     b.build()

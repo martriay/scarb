@@ -1,21 +1,17 @@
-//! [`clap`] arguments implementing Scarb-compatible package selection (`-p` flag etc.)
+use std::fmt;
 
-#![deprecated(
-    since = "1.7.0",
-    note = "This module has been moved to `scarb-ui` crate hosted in Scarb repository. \
-    Removal from `scarb-metadata` is planned in when no usage will be present in open source projects."
-)]
-
+use anyhow::{bail, ensure, Result};
 use camino::{Utf8Path, Utf8PathBuf};
+use indoc::{formatdoc, indoc};
 
-use crate::{Metadata, PackageMetadata};
+use scarb_metadata::{Metadata, PackageMetadata};
 
 /// [`clap`] structured arguments that provide package selection.
 ///
 /// ## Usage
 ///
 /// ```no_run
-/// # use scarb_metadata::packages_filter::PackagesFilter;
+/// # use scarb_ui::args::PackagesFilter;
 /// #[derive(clap::Parser)]
 /// struct Args {
 ///     #[command(flatten)]
@@ -33,54 +29,11 @@ pub struct PackagesFilter {
     workspace: bool,
 }
 
-/// Error type returned from [`PackagesFilter::match_one`] and [`PackagesFilter::match_many`]
-/// functions.
-///
-/// Its internal structure is unspecified, but stringified messages convey meaningful information
-/// to application users.
-#[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
-#[error(transparent)]
-pub struct Error(#[from] InnerError);
-
-#[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
-enum InnerError {
-    // Matching errors.
-    #[error("package `{package_name}` not found in workspace")]
-    OneNotFound { package_name: String },
-    #[error("no workspace members match `{spec}`")]
-    ManyNotFound { spec: String },
-    #[error("workspace has no members")]
-    WorkspaceHasNoMembers,
-    #[error("could not determine which package to work on. Use the `--package` option to specify the package.")]
-    CouldNotDeterminePackageToWorkOn,
-    #[error("workspace has multiple members matching `{spec}`. Use the `--package` option to specify single package.")]
-    FoundMultiple { spec: String },
-
-    // Spec parsing errors.
-    #[error("invalid package spec: * character can only occur once in the pattern")]
-    MultipleStars,
-    #[error("invalid package spec: only `prefix*` patterns are allowed")]
-    NotPrefix,
-}
-
-impl InnerError {
-    fn not_found(spec: &Spec<'_>) -> Self {
-        match spec {
-            Spec::One(package_name) => Self::OneNotFound {
-                package_name: package_name.to_string(),
-            },
-            spec @ (Spec::All | Spec::Glob(_)) => Self::ManyNotFound {
-                spec: spec.to_string(),
-            },
-        }
-    }
-}
-
 impl PackagesFilter {
     /// Find *exactly one* package matching the filter.
     ///
     /// Returns an error if no or more than one packages were found.
-    pub fn match_one<S: PackagesSource>(&self, source: &S) -> Result<S::Package, Error> {
+    pub fn match_one<S: PackagesSource>(&self, source: &S) -> Result<S::Package> {
         let spec = Spec::parse(&self.package)?;
 
         // Check for current package.
@@ -92,18 +45,23 @@ impl PackagesFilter {
         }
 
         let members = source.members();
+
         if (self.workspace || matches!(spec, Spec::All)) && members.len() > 1 {
-            return Err(InnerError::CouldNotDeterminePackageToWorkOn.into());
+            bail!(indoc! {r#"
+                could not determine which package to work on
+                help: use the `--package` option to specify the package
+            "#});
         }
 
         let found = Self::do_match::<S>(&spec, self.workspace, members.into_iter())?;
 
-        if found.len() > 1 {
-            return Err(InnerError::FoundMultiple {
-                spec: spec.to_string(),
-            }
-            .into());
-        }
+        ensure!(
+            found.len() <= 1,
+            formatdoc! {r#"
+                workspace has multiple members matching `{spec}`
+                help: use the `--package` option to specify single package
+            "#}
+        );
 
         Ok(found.into_iter().next().unwrap())
     }
@@ -111,7 +69,7 @@ impl PackagesFilter {
     /// Find *at least one* package matching the filter.
     ///
     /// Returns an error if no packages were found.
-    pub fn match_many<S: PackagesSource>(&self, source: &S) -> Result<Vec<S::Package>, Error> {
+    pub fn match_many<S: PackagesSource>(&self, source: &S) -> Result<Vec<S::Package>> {
         let spec = Spec::parse(&self.package)?;
 
         // Check for current package.
@@ -126,7 +84,7 @@ impl PackagesFilter {
         Self::do_match::<S>(&spec, self.workspace, members.into_iter())
     }
 
-    fn current_package<S: PackagesSource>(&self, source: &S) -> Result<Option<S::Package>, Error> {
+    fn current_package<S: PackagesSource>(&self, source: &S) -> Result<Option<S::Package>> {
         Ok(source
             .members()
             .iter()
@@ -142,12 +100,10 @@ impl PackagesFilter {
         spec: &Spec<'_>,
         workspace: bool,
         members: impl Iterator<Item = S::Package>,
-    ) -> Result<Vec<S::Package>, Error> {
+    ) -> Result<Vec<S::Package>> {
         let mut members = members.peekable();
 
-        if members.peek().is_none() {
-            return Err(InnerError::WorkspaceHasNoMembers.into());
-        }
+        ensure!(members.peek().is_some(), "workspace has no members");
 
         let matches = if workspace {
             members.collect::<Vec<_>>()
@@ -158,7 +114,10 @@ impl PackagesFilter {
         };
 
         if matches.is_empty() {
-            return Err(InnerError::not_found(spec).into());
+            match spec {
+                Spec::One(package_name) => bail!("package `{package_name}` not found in workspace"),
+                Spec::All | Spec::Glob(_) => bail!("no workspace members match `{spec}`"),
+            }
         }
 
         Ok(matches)
@@ -172,20 +131,21 @@ enum Spec<'a> {
 }
 
 impl<'a> Spec<'a> {
-    fn parse(string: &'a str) -> Result<Self, InnerError> {
+    fn parse(string: &'a str) -> Result<Self> {
         let string = string.trim();
 
         if !string.contains('*') {
             return Ok(Self::One(string));
         }
 
-        if string.chars().filter(|c| *c == '*').count() != 1 {
-            return Err(InnerError::MultipleStars);
-        }
-
-        if !string.ends_with('*') {
-            return Err(InnerError::NotPrefix);
-        }
+        ensure!(
+            string.chars().filter(|c| *c == '*').count() == 1,
+            "invalid package spec: * character can only occur once in the pattern"
+        );
+        ensure!(
+            string.ends_with('*'),
+            "invalid package spec: only `prefix*` patterns are allowed"
+        );
 
         let string = string.trim_end_matches('*');
 
@@ -205,12 +165,12 @@ impl<'a> Spec<'a> {
     }
 }
 
-impl<'a> ToString for Spec<'a> {
-    fn to_string(&self) -> String {
+impl<'a> fmt::Display for Spec<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Spec::All => "*".to_owned(),
-            Spec::One(name) => name.to_string(),
-            Spec::Glob(pat) => format!("{pat}*"),
+            Spec::All => write!(f, "*"),
+            Spec::One(name) => write!(f, "{name}"),
+            Spec::Glob(pat) => write!(f, "{pat}*"),
         }
     }
 }
@@ -221,6 +181,12 @@ impl<'a> ToString for Spec<'a> {
 pub trait WithManifestPath {
     #[doc(hidden)]
     fn manifest_path(&self) -> &Utf8Path;
+}
+
+impl WithManifestPath for PackageMetadata {
+    fn manifest_path(&self) -> &Utf8Path {
+        &self.manifest_path
+    }
 }
 
 /// Generic interface used by [`PackagesFilter`] to pull information from.

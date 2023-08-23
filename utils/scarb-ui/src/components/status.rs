@@ -1,8 +1,10 @@
 use console::{pad_str, Alignment, Style};
 use serde::{Serialize, Serializer};
 
-use crate::ui::Message;
+use crate::Message;
 
+/// Notes:
+/// - `status` should always be a single verb, for example _Compiling_, _Running_.
 #[derive(Serialize)]
 pub struct Status<'a> {
     status: &'a str,
@@ -33,7 +35,7 @@ impl<'a> Message for Status<'a> {
                 self.status,
                 12,
                 Alignment::Right,
-                None
+                None,
             )),
             self.message
         )

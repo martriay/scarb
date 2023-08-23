@@ -1,8 +1,8 @@
 use assert_fs::TempDir;
-use indoc::{formatdoc, indoc};
+use indoc::indoc;
 
 use scarb_test_support::command::Scarb;
-use scarb_test_support::filesystem::{path_with_temp_dir, write_script};
+use scarb_test_support::filesystem::{path_with_temp_dir, write_simple_hello_script};
 use scarb_test_support::project_builder::ProjectBuilder;
 
 #[test]
@@ -12,14 +12,7 @@ use scarb_test_support::project_builder::ProjectBuilder;
 )]
 fn delegates_to_cairo_test() {
     let t = TempDir::new().unwrap();
-    write_script(
-        "cairo-test",
-        &formatdoc! {r#"
-            #!/usr/bin/env bash
-            echo "Hello $@"
-        "#},
-        &t,
-    );
+    write_simple_hello_script("cairo-test", &t);
 
     ProjectBuilder::start().build(&t);
 
@@ -30,7 +23,7 @@ fn delegates_to_cairo_test() {
         .assert()
         .success()
         .stdout_eq(indoc! {r#"
-        Running tests for package: pkg0
+             Running cairo-test pkg0
         Hello beautiful world
         "#});
 }
@@ -51,7 +44,7 @@ fn prefers_test_script() {
         .assert()
         .success()
         .stdout_eq(indoc! {r#"
-        Running tests for package: pkg0
+             Running test pkg0 (echo 'Hello from script')
         Hello from script beautiful world
         "#});
 }
@@ -74,7 +67,7 @@ fn errors_when_missing_script_and_cairo_test() {
         .assert()
         .failure()
         .stdout_eq(indoc! {r#"
-        Running tests for package: pkg0
+             Running cairo-test pkg0
         error: no such command: `cairo-test`
         "#});
 }
